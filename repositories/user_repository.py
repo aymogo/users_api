@@ -26,6 +26,7 @@ class UserRepository:
     async def create(self, user: User) -> User:
         self._session.add(user)
         await self._session.flush()
+        await self._session.refresh(user)
         return user
 
     async def delete(self, user: User) -> None:
@@ -34,4 +35,5 @@ class UserRepository:
     async def save(self, user: User) -> User:
         """Persist changes made to an already-tracked entity."""
         await self._session.flush()
+        await self._session.refresh(user)
         return user
