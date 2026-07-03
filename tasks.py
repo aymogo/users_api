@@ -76,7 +76,7 @@ def cleanup_unverified_users() -> dict:
         result = conn.execute(
             delete(User).where(
                 User.is_verified == False,  # noqa: E712 — SQLAlchemy filter
-                User.created_at < cutoff,
+                User.verification_code_expires_at < cutoff,
             )
         )
         deleted_count = result.rowcount
