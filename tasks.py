@@ -4,12 +4,14 @@ Provides a Celery Beat scheduled task that automatically deletes users who have
 not completed email verification within the configured TTL (default: 2 days).
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
 from celery import Celery
 from celery.schedules import crontab
-from sqlalchemy import create_engine, delete
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from core.config import settings
 from models.user import User
@@ -47,18 +49,18 @@ celery_app.conf.beat_schedule = {
 # Tasks
 # ---------------------------------------------------------------------------
 
-def _get_sync_database_url() -> str:
-    """Convert the async DATABASE_URL to a synchronous one for Celery tasks.
-
-    Celery workers run in a synchronous context, so we need a sync driver
-    (psycopg2 for PostgreSQL, or plain sqlite for SQLite).
-    """
-    url = settings.DATABASE_URL
-    if url.startswith("postgresql+asyncpg://"):
-        return url.replace("postgresql+asyncpg://", "postgresql://", 1)
-    if url.startswith("sqlite+aiosqlite://"):
-        return url.replace("sqlite+aiosqlite://", "sqlite://", 1)
-    return url
+async def _run_cleanup(cutoff: datetime) -> int:
+    engine = create_async_engine(settings.DATABASE_URL)
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            delete(User).where(
+                User.is_verified == False,  # noqa: E712
+                User.created_at < cutoff,
+            )
+        )
+        deleted_count = result.rowcount
+    await engine.dispose()
+    return deleted_count
 
 
 @celery_app.task(name="tasks.cleanup_unverified_users")
@@ -69,19 +71,7 @@ def cleanup_unverified_users() -> dict:
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=settings.UNVERIFIED_USER_TTL_DAYS)
 
-    sync_url = _get_sync_database_url()
-    engine = create_engine(sync_url)
-
-    with engine.begin() as conn:
-        result = conn.execute(
-            delete(User).where(
-                User.is_verified == False,  # noqa: E712 — SQLAlchemy filter
-                User.verification_code_expires_at < cutoff,
-            )
-        )
-        deleted_count = result.rowcount
-
-    engine.dispose()
+    deleted_count = asyncio.run(_run_cleanup(cutoff))
 
     logger.info("Cleanup: deleted %d unverified user(s) older than %s.", deleted_count, cutoff)
     return {"deleted": deleted_count, "cutoff": cutoff.isoformat()}
